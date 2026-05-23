@@ -4,15 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#020617" />
-  <meta name="description" content="TerraPulse - live 3D map of new AI/ML repos with real coordinates. Earthquakes and ISS overlays included." />
+  <meta name="description" content="TerraPulse - live 3D map of new AI/ML launches with topic classification, time scrubbing, and animated arrivals." />
   <meta property="og:title" content="TerraPulse - Live AI Launch Map" />
-  <meta property="og:description" content="Every new AI/ML repo on Earth, on a 3D globe. Live data from GitHub, USGS, and the ISS." />
+  <meta property="og:description" content="Every new AI/ML repo on Earth, on a 3D globe. Real coordinates, animated arrivals, topic clustering, ISS trail, live quakes." />
   <meta property="og:type" content="website" />
   <meta name="twitter:card" content="summary_large_image" />
   <title>TerraPulse - Live AI Launch Map</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <canvas id="starfield" aria-hidden="true"></canvas>
   <div id="globe-container" aria-label="Interactive 3D globe of Earth"></div>
 
   <header class="topbar">
@@ -22,8 +23,8 @@
       <span class="brand-tag">live AI launch map</span>
     </div>
     <nav class="layers" role="group" aria-label="Data layers">
-      <button class="layer-btn active" data-layer="ai" title="New AI/ML repos this week">
-        <span class="layer-dot" style="--c:#22d3ee"></span>AI launches <em id="count-ai">-</em>
+      <button class="layer-btn active" data-layer="ai" title="New AI/ML repos">
+        <span class="layer-dot" style="--c:#22d3ee"></span>AI <em id="count-ai">-</em>
       </button>
       <button class="layer-btn active" data-layer="quakes" title="Earthquakes last 24h">
         <span class="layer-dot" style="--c:#ef4444"></span>Quakes <em id="count-quakes">-</em>
@@ -37,6 +38,14 @@
       <button class="btn-ghost" id="info-btn">About</button>
     </div>
   </header>
+
+  <div class="narrative-bar" id="narrative-bar" hidden>
+    <div class="narrative-text" id="narrative-text"></div>
+    <div class="time-scrubber">
+      <label class="scrubber-label">Window: <span id="window-label">7d</span></label>
+      <input id="window-slider" type="range" min="1" max="30" value="7" step="1" aria-label="Filter by time window" />
+    </div>
+  </div>
 
   <aside class="side-panel" id="side-panel" aria-live="polite">
     <div class="panel-header">
@@ -52,17 +61,28 @@
 
   <button class="panel-toggle" id="panel-toggle" aria-label="Toggle side panel">›</button>
 
+  <div class="legend" id="legend">
+    <span><i style="background:#22d3ee"></i>LLM</span>
+    <span><i style="background:#f472b6"></i>Vision</span>
+    <span><i style="background:#fbbf24"></i>Audio</span>
+    <span><i style="background:#a78bfa"></i>Agents</span>
+    <span><i style="background:#34d399"></i>Framework</span>
+    <span><i style="background:#94a3b8"></i>Other</span>
+  </div>
+
   <dialog id="info-modal" class="modal">
     <div class="modal-body">
       <h3>About TerraPulse</h3>
       <p>A live 3D map of new AI/ML repositories on GitHub, geo-located to their authoring organisation.</p>
       <ul>
-        <li><strong>AI launches</strong> — repos created in the last 7 days with at least 30 stars matching AI/ML keywords. Pulled live from the GitHub Search API.</li>
-        <li><strong>Quakes</strong> — last-24h feed from USGS.</li>
-        <li><strong>ISS</strong> — current location of the International Space Station via wheretheiss.at, refreshed every 5 seconds.</li>
+        <li><strong>AI launches</strong> — repos created in the last 30 days with at least 30 stars matching AI/ML keywords. Pulled live from the GitHub Search API and classified into LLM / Vision / Audio / Agents / Framework / Other.</li>
+        <li><strong>Time scrubber</strong> — filter to the last 1–30 days. Recent launches arrive with animated arcs.</li>
+        <li><strong>Hover</strong> a repo to see other repos by the same owner. <strong>Click</strong> to open on GitHub.</li>
+        <li><strong>Quakes</strong> — last-24h feed from USGS. Magnitude ≥5 events get a shockwave ring.</li>
+        <li><strong>ISS</strong> — current location plus the orbital trail of the last few minutes via wheretheiss.at.</li>
       </ul>
       <p class="modal-sub">Org coordinates are a curated list of ~40 major AI labs. Repos from un-mapped owners are not shown — by design, no fabricated coordinates.</p>
-      <p class="modal-sub">This is the static demo. The full version (sign-in with GitHub, moderated community pulses, daily email alerts, Stripe-backed Verified tier) is in the same repo and deploys to Render via <code>render.yaml</code>.</p>
+      <p class="modal-sub">Static demo. The full version (sign-in with GitHub, moderated community pulses, daily email alerts, Stripe-backed Verified tier) is in the same repo and deploys to Render via <code>render.yaml</code>.</p>
       <div class="modal-actions">
         <button type="button" class="btn-primary" id="info-close">Close</button>
       </div>
