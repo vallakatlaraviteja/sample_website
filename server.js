@@ -1,9 +1,15 @@
-// TerraPulse server.
-// Single Node service: serves static frontend + JSON API.
-// Aggressively caches third-party APIs to stay under free-tier limits.
+// TerraPulse server v2.
+// - Auth (GitHub OAuth)
+// - Moderation queue + admin endpoints
+// - Real geocoding for AI repos (no fake hash coords)
+// - Self-hosted globe textures (with CDN fallback)
+// - Stripe checkout for $5/mo Verified tier
+// - Email-alert subscriptions
 
 require('dotenv').config();
 const path = require('path');
+const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const compression = require('compression');
@@ -11,44 +17,65 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
 const db = require('./db');
+const auth = require('./lib/auth');
+const moderation = require('./lib/moderation');
+const billing = require('./lib/billing');
+const { fetchRecentAIRepos } = require('./lib/ai_launches');
+const { locateRepos, scheduleGeocode } = require('./lib/geocode');
 
 const PORT = process.env.PORT || 3000;
-const app = express();
+const APP_MODE = process.env.APP_MODE || 'ai';
+const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
 
-// --- Middleware -------------------------------------------------------------
+const app = express();
 app.set('trust proxy', 1);
+
+// Stripe webhook needs raw body BEFORE json parser. Mount it first.
+app.post('/api/billing/webhook',
+  express.raw({ type: 'application/json' }),
+  async (req, res) => {
+    const r = await billing.handleWebhook(req, req.body);
+    if (!r.ok) return res.status(400).json({ error: r.reason || 'webhook_failed' });
+    res.json({ ok: true });
+  }
+);
+
+// CSP allows our inlined globe.gl/three from CDN AND self-hosted textures.
 app.use(
   helmet({
-    contentSecurityPolicy: false, // we load three.js / globe.gl from CDN
+    contentSecurityPolicy: {
+      useDefaults: true,
+      directives: {
+        'default-src': ["'self'"],
+        'script-src': ["'self'", 'https://unpkg.com'],
+        'style-src': ["'self'", "'unsafe-inline'"],
+        'img-src': ["'self'", 'data:', 'blob:', 'https://unpkg.com', 'https://avatars.githubusercontent.com'],
+        'connect-src': ["'self'"],
+        'frame-ancestors': ["'none'"],
+      },
+    },
     crossOriginEmbedderPolicy: false,
   })
 );
 app.use(compression());
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '10kb' }));
+app.use(auth.attachUser);
 
-const writeLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10, // 10 pulse submissions per minute per IP
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+const writeLimiter = rateLimit({ windowMs: 60_000, max: 8, standardHeaders: true });
+const authLimiter  = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true });
 
-// --- Simple TTL cache -------------------------------------------------------
+// --- TTL cache --------------------------------------------------------------
 const cache = new Map();
 async function cached(key, ttlMs, fetcher) {
   const hit = cache.get(key);
-  const now = Date.now();
-  if (hit && now - hit.t < ttlMs) return hit.v;
+  if (hit && Date.now() - hit.t < ttlMs) return hit.v;
   try {
     const v = await fetcher();
-    cache.set(key, { t: now, v });
+    cache.set(key, { t: Date.now(), v });
     return v;
   } catch (err) {
-    if (hit) {
-      console.warn(`[cache] ${key} fetch failed, serving stale:`, err.message);
-      return hit.v;
-    }
+    if (hit) return hit.v;
     throw err;
   }
 }
@@ -58,7 +85,7 @@ async function fetchJson(url, opts = {}) {
   const t = setTimeout(() => ctrl.abort(), opts.timeout || 8000);
   try {
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'TerraPulse/1.0' },
+      headers: { 'User-Agent': 'TerraPulse/2.0', ...(opts.headers || {}) },
       signal: ctrl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -68,24 +95,84 @@ async function fetchJson(url, opts = {}) {
   }
 }
 
-// --- Health -----------------------------------------------------------------
+// --- Health + config --------------------------------------------------------
 app.get('/api/health', async (req, res) => {
   const dbHealth = await db.healthcheck();
   res.json({ status: 'ok', uptime: process.uptime(), ...dbHealth });
 });
 
-// --- Live signals -----------------------------------------------------------
+app.get('/api/config', (req, res) => {
+  res.json({
+    appMode: APP_MODE,
+    authEnabled: auth.isAuthEnabled(),
+    billingEnabled: billing.isEnabled(),
+    user: req.user ? {
+      id: req.user.id,
+      login: req.user.login,
+      avatar: req.user.avatar_url,
+      email: req.user.email,
+      isAdmin: req.user.is_admin,
+      isVerified: req.user.is_verified,
+    } : null,
+  });
+});
 
-// ISS current position (open-notify, no key)
+// --- OAuth ------------------------------------------------------------------
+const oauthStates = new Map(); // state -> expires
+function stashState() {
+  const s = crypto.randomBytes(16).toString('hex');
+  oauthStates.set(s, Date.now() + 10 * 60_000);
+  return s;
+}
+function consumeState(s) {
+  const exp = oauthStates.get(s);
+  oauthStates.delete(s);
+  return exp && exp > Date.now();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of oauthStates) if (v < now) oauthStates.delete(k);
+}, 5 * 60_000).unref();
+
+app.get('/api/auth/github/start', authLimiter, (req, res) => {
+  if (!auth.isAuthEnabled()) return res.status(503).json({ error: 'auth_disabled' });
+  const state = stashState();
+  res.redirect(auth.startUrl(state));
+});
+
+app.get('/api/auth/github/callback', authLimiter, async (req, res) => {
+  if (!auth.isAuthEnabled()) return res.status(503).send('auth disabled');
+  const { code, state } = req.query;
+  if (!code || !state || !consumeState(String(state))) return res.status(400).send('bad state');
+  try {
+    const accessToken = await auth.exchangeCode(String(code));
+    const profile = await auth.fetchGithubUser(accessToken);
+    const user = await auth.upsertUser(profile);
+    const sess = await auth.createSession(user.id);
+    auth.setSessionCookie(res, sess.token, sess.expires);
+    // Pre-warm location cache for the user's own login (cheap and useful).
+    if (user.login) scheduleGeocode(user.login);
+    res.redirect('/');
+  } catch (err) {
+    console.error('[auth] callback err:', err.message);
+    res.status(500).send('auth failed');
+  }
+});
+
+app.post('/api/auth/logout', authLimiter, async (req, res) => {
+  await auth.destroySession(req.sessionToken);
+  auth.clearSessionCookie(res);
+  res.json({ ok: true });
+});
+
+// --- Live signals -----------------------------------------------------------
 app.get('/api/signals/iss', async (req, res) => {
   try {
     const data = await cached('iss', 5_000, async () => {
-      const j = await fetchJson('http://api.open-notify.org/iss-now.json');
-      return {
-        lat: Number(j.iss_position.latitude),
-        lng: Number(j.iss_position.longitude),
-        timestamp: j.timestamp * 1000,
-      };
+      // open-notify is HTTP-only and flaky; wsf.spotthestation.nasa.gov has no JSON API.
+      // Use wheretheiss.at - HTTPS, JSON, no key.
+      const j = await fetchJson('https://api.wheretheiss.at/v1/satellites/25544');
+      return { lat: Number(j.latitude), lng: Number(j.longitude), timestamp: j.timestamp * 1000 };
     });
     res.json(data);
   } catch (err) {
@@ -93,7 +180,6 @@ app.get('/api/signals/iss', async (req, res) => {
   }
 });
 
-// Earthquakes (USGS, no key) - last 24h
 app.get('/api/signals/quakes', async (req, res) => {
   try {
     const data = await cached('quakes', 60_000, async () => {
@@ -117,90 +203,72 @@ app.get('/api/signals/quakes', async (req, res) => {
   }
 });
 
-// Trending tech repos via GitHub search API (anonymous, low rate limit)
-app.get('/api/signals/tech', async (req, res) => {
+// AI launches: real GitHub repos with REAL geocoded owner locations.
+// Repos whose owners we can't locate are omitted (no fabricated coords).
+app.get('/api/signals/ai_launches', async (req, res) => {
   try {
-    const data = await cached('tech', 10 * 60_000, async () => {
-      const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-        .toISOString()
-        .slice(0, 10);
-      const j = await fetchJson(
-        `https://api.github.com/search/repositories?q=created:>${since}&sort=stars&order=desc&per_page=20`
-      );
-      // Fake-locate by hashing owner login to a stable lat/lng so they
-      // appear scattered. Real geo would need owner-location lookup.
-      return (j.items || []).map((r) => {
-        const h = hash(r.owner.login);
-        const lat = ((h % 1600) / 10) - 80;       // -80..80
-        const lng = (((h >> 4) % 3600) / 10) - 180; // -180..180
-        return {
-          id: r.id,
-          name: r.full_name,
-          description: r.description,
-          stars: r.stargazers_count,
-          language: r.language,
-          url: r.html_url,
-          owner: r.owner.login,
-          ownerAvatar: r.owner.avatar_url,
-          lat,
-          lng,
-        };
-      });
+    const data = await cached('ai_launches', 10 * 60_000, async () => {
+      const repos = await fetchRecentAIRepos({ daysBack: 7, minStars: 30, perPage: 50 });
+      const located = await locateRepos(repos);
+      // Schedule geocoding for the un-located ones so they appear next time.
+      const locatedIds = new Set(located.map((r) => r.id));
+      for (const r of repos) {
+        if (!locatedIds.has(r.id)) scheduleGeocode(r.owner);
+      }
+      return {
+        located,
+        pending: repos.length - located.length,
+        total: repos.length,
+      };
     });
     res.json(data);
   } catch (err) {
-    res.status(502).json({ error: 'tech_unavailable', detail: err.message });
+    res.status(502).json({ error: 'ai_unavailable', detail: err.message });
   }
 });
 
-function hash(str) {
-  let h = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = (h * 16777619) >>> 0;
-  }
-  return h;
-}
-
-// --- User pulses (DB-backed) ------------------------------------------------
-const ALLOWED_CATEGORIES = new Set([
-  'tech', 'science', 'climate', 'space', 'health', 'culture', 'other',
-]);
-
+// --- Pulses (read) ----------------------------------------------------------
 app.get('/api/pulses', async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
-    const items = await db.getPulses({ limit });
+    const items = await db.getPulses({ limit, status: 'approved' });
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: 'pulses_failed', detail: err.message });
   }
 });
 
-app.post('/api/pulses', writeLimiter, async (req, res) => {
-  const { title, description, category, lat, lng, url } = req.body || {};
+// --- Pulses (create) --------------------------------------------------------
+const ALLOWED_CATEGORIES = new Set([
+  'ai_launch', 'tech', 'science', 'climate', 'space', 'health', 'culture', 'other',
+]);
 
-  if (!title || typeof title !== 'string' || title.length > 140) {
-    return res.status(400).json({ error: 'invalid_title' });
+app.post('/api/pulses', writeLimiter, async (req, res) => {
+  // If auth is enabled, require login. If not enabled (dev), allow anonymous
+  // but mark pending.
+  if (auth.isAuthEnabled() && !req.user) {
+    return res.status(401).json({ error: 'auth_required' });
   }
-  if (!category || !ALLOWED_CATEGORIES.has(category)) {
-    return res.status(400).json({ error: 'invalid_category' });
-  }
-  const latN = Number(lat);
-  const lngN = Number(lng);
-  if (!Number.isFinite(latN) || latN < -90 || latN > 90) {
-    return res.status(400).json({ error: 'invalid_lat' });
-  }
-  if (!Number.isFinite(lngN) || lngN < -180 || lngN > 180) {
-    return res.status(400).json({ error: 'invalid_lng' });
-  }
-  if (url && (typeof url !== 'string' || !/^https?:\/\//i.test(url))) {
-    return res.status(400).json({ error: 'invalid_url' });
+
+  const { title, description, category, lat, lng, url } = req.body || {};
+  if (!title || typeof title !== 'string' || title.length > 140) return res.status(400).json({ error: 'invalid_title' });
+  if (!category || !ALLOWED_CATEGORIES.has(category)) return res.status(400).json({ error: 'invalid_category' });
+  const latN = Number(lat), lngN = Number(lng);
+  if (!Number.isFinite(latN) || latN < -90 || latN > 90) return res.status(400).json({ error: 'invalid_lat' });
+  if (!Number.isFinite(lngN) || lngN < -180 || lngN > 180) return res.status(400).json({ error: 'invalid_lng' });
+
+  const isVerified = Boolean(req.user?.is_verified);
+  const verdict = moderation.evaluate({ title, description, url, isVerified });
+  if (!verdict.allow) {
+    return res.status(400).json({ error: 'rejected', reasons: verdict.reasons });
   }
 
   try {
     const item = await db.createPulse({
       title, description, category, lat: latN, lng: lngN, url,
+      userId: req.user?.id || null,
+      status: verdict.autoApprove ? 'approved' : 'pending',
+      verified: isVerified,
     });
     res.status(201).json(item);
   } catch (err) {
@@ -208,19 +276,109 @@ app.post('/api/pulses', writeLimiter, async (req, res) => {
   }
 });
 
-// --- Static frontend --------------------------------------------------------
-app.use(express.static(path.join(__dirname, 'public'), {
+// --- Moderation queue (admin only) ------------------------------------------
+app.get('/api/admin/pending', auth.requireAdmin, async (req, res) => {
+  const items = await db.getPendingPulses({ limit: 200 });
+  res.json(items);
+});
+
+app.post('/api/admin/pulses/:id/decision', auth.requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  const { action, reason } = req.body || {};
+  if (!Number.isFinite(id) || !['approve', 'reject'].includes(action)) {
+    return res.status(400).json({ error: 'invalid_request' });
+  }
+  try {
+    await db.moderatePulse({ pulseId: id, action, moderatorId: req.user.id, reason });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'mod_failed', detail: err.message });
+  }
+});
+
+// --- Alerts -----------------------------------------------------------------
+app.get('/api/alerts', auth.requireUser, async (req, res) => {
+  const items = await db.getUserAlerts(req.user.id);
+  res.json(items);
+});
+
+app.post('/api/alerts', auth.requireUser, async (req, res) => {
+  const { kind, config, email } = req.body || {};
+  if (!['ai_launch', 'quake', 'category'].includes(kind)) {
+    return res.status(400).json({ error: 'invalid_kind' });
+  }
+  const targetEmail = email || req.user.email;
+  if (!targetEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(targetEmail)) {
+    return res.status(400).json({ error: 'invalid_email' });
+  }
+  // Free tier: at most 3 alerts per user. Verified: 25.
+  const existing = await db.getUserAlerts(req.user.id);
+  const cap = req.user.is_verified ? 25 : 3;
+  if (existing.length >= cap) return res.status(402).json({ error: 'alert_cap', cap });
+
+  const alert = await db.createAlert({
+    userId: req.user.id, kind, config: config || {}, email: targetEmail,
+  });
+  res.status(201).json(alert);
+});
+
+app.delete('/api/alerts/:id', auth.requireUser, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid_id' });
+  await db.deleteAlert(req.user.id, id);
+  res.json({ ok: true });
+});
+
+// --- Billing ----------------------------------------------------------------
+app.post('/api/billing/checkout', auth.requireUser, async (req, res) => {
+  if (!billing.isEnabled()) return res.status(503).json({ error: 'billing_disabled' });
+  try {
+    const url = await billing.createCheckoutSession(req.user);
+    res.json({ url });
+  } catch (err) {
+    res.status(500).json({ error: 'checkout_failed', detail: err.message });
+  }
+});
+
+// --- Static -----------------------------------------------------------------
+const STATIC_DIR = path.join(__dirname, 'public');
+
+// Texture path: prefer self-hosted, fall back to redirect-to-CDN if missing.
+app.get('/textures/:file', (req, res) => {
+  const safe = req.params.file.replace(/[^a-zA-Z0-9._-]/g, '');
+  const local = path.join(STATIC_DIR, 'textures', safe);
+  if (fs.existsSync(local)) {
+    res.set('Cache-Control', 'public, max-age=2592000, immutable');
+    return res.sendFile(local);
+  }
+  return res.redirect(302, `https://unpkg.com/three-globe@2.31.0/example/img/${safe}`);
+});
+
+app.use(express.static(STATIC_DIR, {
   maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0,
   index: 'index.html',
 }));
 
 app.use((req, res) => {
-  if (req.path.startsWith('/api/')) {
-    return res.status(404).json({ error: 'not_found' });
-  }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not_found' });
+  res.sendFile(path.join(STATIC_DIR, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`[terrapulse] listening on :${PORT} (${process.env.NODE_ENV || 'development'})`);
+// --- Boot + graceful shutdown ------------------------------------------------
+const server = app.listen(PORT, () => {
+  console.log(`[terrapulse] listening on :${PORT} mode=${APP_MODE} env=${process.env.NODE_ENV || 'development'}`);
+  if (!auth.isAuthEnabled()) console.warn('[terrapulse] auth disabled (set GITHUB_CLIENT_ID + GITHUB_CLIENT_SECRET)');
+  if (!billing.isEnabled()) console.warn('[terrapulse] billing disabled (set STRIPE_SECRET_KEY + STRIPE_PRICE_VERIFIED)');
+  if (!process.env.RESEND_API_KEY) console.warn('[terrapulse] email disabled (set RESEND_API_KEY)');
 });
+
+function shutdown(signal) {
+  console.log(`[terrapulse] ${signal} received, draining...`);
+  server.close(async () => {
+    await db.shutdown();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 8000).unref();
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
