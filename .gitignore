@@ -8,3 +8,7 @@ npm-debug.log*
 .idea/
 dist/
 coverage/
+
+# Vendored CDN assets (regenerated on install). Tracked path is empty.
+public/textures/*
+!public/textures/.gitkeep
