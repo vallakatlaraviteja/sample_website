@@ -1,10 +1,52 @@
 services:
+  # Web service: serves frontend + JSON API.
   - type: web
     name: terrapulse
     runtime: node
     plan: free
     buildCommand: npm install && npm run migrate
     startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_MODE
+        value: ai
+      - key: DATABASE_URL
+        fromDatabase:
+          name: terrapulse-db
+          property: connectionString
+      - key: DISABLE_DB
+        value: "false"
+      - key: PUBLIC_URL
+        sync: false        # set after first deploy: https://<service>.onrender.com
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: ADMIN_LOGINS
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_VERIFIED
+        sync: false
+
+  # Daily digest cron job. Reuses the same DB + secrets.
+  - type: cron
+    name: terrapulse-digests
+    runtime: node
+    plan: free
+    schedule: "0 13 * * *"   # 13:00 UTC daily (~9am ET, 6am PT)
+    buildCommand: npm install
+    startCommand: npm run send-digests
     envVars:
       - key: NODE_ENV
         value: production
@@ -12,8 +54,12 @@ services:
         fromDatabase:
           name: terrapulse-db
           property: connectionString
-      - key: DISABLE_DB
-        value: "false"
+      - key: PUBLIC_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
 
 databases:
   - name: terrapulse-db

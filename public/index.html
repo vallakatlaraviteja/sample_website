@@ -4,9 +4,13 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta name="theme-color" content="#020617" />
-  <meta name="description" content="TerraPulse - real-time 3D Earth dashboard fusing live world and tech signals." />
-  <title>TerraPulse - Live Pulse of the Planet</title>
-  <link rel="preconnect" href="https://unpkg.com" />
+  <meta name="description" content="TerraPulse - live 3D map of new AI launches with email alerts. Real coordinates, no fake data, moderated community pulses." />
+  <meta property="og:title" content="TerraPulse - Live AI Launch Map" />
+  <meta property="og:description" content="See every new AI/ML repo on Earth, on a 3D globe. Get email alerts when launches cross your filter." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://terrapulse.example" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <title>TerraPulse · Live AI Launch Map</title>
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
@@ -16,23 +20,34 @@
     <div class="brand">
       <span class="logo-dot"></span>
       <span class="brand-name">TerraPulse</span>
-      <span class="brand-tag">live pulse of the planet</span>
+      <span class="brand-tag">live AI launch map</span>
     </div>
     <nav class="layers" role="group" aria-label="Data layers">
-      <button class="layer-btn active" data-layer="quakes">
+      <button class="layer-btn active" data-layer="ai" title="New AI/ML repos this week">
+        <span class="layer-dot" style="--c:#22d3ee"></span>AI launches <em id="count-ai">-</em>
+      </button>
+      <button class="layer-btn active" data-layer="quakes" title="Earthquakes last 24h">
         <span class="layer-dot" style="--c:#ef4444"></span>Quakes <em id="count-quakes">-</em>
       </button>
-      <button class="layer-btn active" data-layer="tech">
-        <span class="layer-dot" style="--c:#22d3ee"></span>Tech <em id="count-tech">-</em>
-      </button>
-      <button class="layer-btn active" data-layer="iss">
+      <button class="layer-btn active" data-layer="iss" title="International Space Station">
         <span class="layer-dot" style="--c:#facc15"></span>ISS
       </button>
-      <button class="layer-btn active" data-layer="pulses">
+      <button class="layer-btn active" data-layer="pulses" title="Community pulses">
         <span class="layer-dot" style="--c:#a78bfa"></span>Pulses <em id="count-pulses">-</em>
       </button>
     </nav>
-    <button class="add-btn" id="add-pulse-btn" aria-haspopup="dialog">+ Add Pulse</button>
+    <div class="topbar-actions">
+      <button class="btn-ghost" id="alerts-btn" hidden>Alerts</button>
+      <button class="btn-ghost" id="admin-btn" hidden>Admin</button>
+      <button class="btn-ghost" id="login-btn">Sign in with GitHub</button>
+      <div class="user-chip" id="user-chip" hidden>
+        <img id="user-avatar" alt="" />
+        <span id="user-login"></span>
+        <span class="badge" id="user-badge" hidden></span>
+        <button class="btn-link" id="logout-btn">Sign out</button>
+      </div>
+      <button class="add-btn" id="add-pulse-btn" aria-haspopup="dialog">+ Drop Pulse</button>
+    </div>
   </header>
 
   <aside class="side-panel" id="side-panel" aria-live="polite">
@@ -41,9 +56,9 @@
       <span class="status" id="status-text">connecting…</span>
     </div>
     <div class="panel-tabs" role="tablist">
-      <button class="tab active" data-tab="recent">Recent</button>
+      <button class="tab active" data-tab="ai">AI Launches</button>
+      <button class="tab" data-tab="recent">Recent</button>
       <button class="tab" data-tab="quakes">Quakes</button>
-      <button class="tab" data-tab="tech">Tech</button>
       <button class="tab" data-tab="pulses">Pulses</button>
     </div>
     <div class="panel-body" id="panel-body"></div>
@@ -59,10 +74,11 @@
   <dialog id="pulse-modal" class="modal">
     <form method="dialog" id="pulse-form">
       <h3>Drop a Pulse</h3>
-      <p class="modal-sub">Geo-tag a tech, science, or world event. Click globe to set location.</p>
-      <label>Title <input name="title" maxlength="140" required placeholder="e.g. Open-source AI summit" /></label>
+      <p class="modal-sub" id="pulse-modal-sub">Geo-tag a tech, science, or world event. Click globe to set location.</p>
+      <label>Title <input name="title" maxlength="140" required placeholder="e.g. New AI inference framework" /></label>
       <label>Category
         <select name="category" required>
+          <option value="ai_launch">AI launch</option>
           <option value="tech">Tech</option>
           <option value="science">Science</option>
           <option value="climate">Climate</option>
@@ -81,9 +97,67 @@
       <p class="hint" id="pulse-hint">Tip: close this and click anywhere on the globe to set lat/lng.</p>
       <div class="modal-actions">
         <button type="button" id="cancel-pulse" class="btn-ghost">Cancel</button>
-        <button type="submit" class="btn-primary">Drop Pulse</button>
+        <button type="submit" class="btn-primary">Submit</button>
       </div>
+      <p class="hint review-note" id="review-note">Pulses go to moderation review before appearing publicly. Verified accounts skip the queue.</p>
     </form>
+  </dialog>
+
+  <!-- Alerts Modal -->
+  <dialog id="alerts-modal" class="modal">
+    <div class="modal-body">
+      <h3>Email alerts</h3>
+      <p class="modal-sub">Get a daily digest when new AI/ML repos cross your filter.</p>
+
+      <div class="alerts-list" id="alerts-list"></div>
+
+      <form id="alert-form" class="alert-form">
+        <h4>New alert</h4>
+        <label>Type
+          <select name="kind">
+            <option value="ai_launch">AI launches (daily digest)</option>
+            <option value="quake">Earthquakes near a location</option>
+          </select>
+        </label>
+        <div id="ai-config" class="alert-config">
+          <label>Min stars <input name="minStars" type="number" value="50" min="0" max="100000" /></label>
+          <label>Language (optional) <input name="language" placeholder="Python, Rust, ..." /></label>
+        </div>
+        <div id="quake-config" class="alert-config" hidden>
+          <div class="latlng-row">
+            <label>Lat <input name="qLat" type="number" step="0.01" /></label>
+            <label>Lng <input name="qLng" type="number" step="0.01" /></label>
+          </div>
+          <label>Radius (km) <input name="radiusKm" type="number" value="200" min="10" max="20000" /></label>
+          <label>Min magnitude <input name="minMag" type="number" step="0.1" value="5" min="0" max="10" /></label>
+        </div>
+        <label>Email <input name="email" type="email" required placeholder="you@example.com" /></label>
+        <div class="modal-actions">
+          <button type="submit" class="btn-primary">Add alert</button>
+          <button type="button" class="btn-ghost" id="alerts-close">Close</button>
+        </div>
+      </form>
+
+      <div class="upgrade-card" id="upgrade-card" hidden>
+        <div>
+          <strong>Verified tier · $5/mo</strong>
+          <p>Skip moderation, up to 25 alerts, "verified" badge on your pulses.</p>
+        </div>
+        <button class="btn-primary" id="upgrade-btn">Upgrade</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Admin Modal -->
+  <dialog id="admin-modal" class="modal admin-modal">
+    <div class="modal-body">
+      <h3>Moderation queue</h3>
+      <p class="modal-sub">Pending pulses. Approve to publish, reject to hide.</p>
+      <div id="admin-list" class="admin-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="admin-close">Close</button>
+      </div>
+    </div>
   </dialog>
 
   <div class="loading" id="loading">
@@ -91,9 +165,8 @@
     <p>Booting the planet…</p>
   </div>
 
-  <!-- Three.js + globe.gl from CDN. Pinned versions for stability. -->
   <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
   <script src="https://unpkg.com/globe.gl@2.32.4/dist/globe.gl.min.js"></script>
-  <script src="/main.js" type="module"></script>
+  <script src="/main.js"></script>
 </body>
 </html>
