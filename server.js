@@ -117,6 +117,21 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+// ISS current position
+// wheretheiss.at over HTTPS. Previously used open-notify.org which is
+// HTTP-only and has been intermittently dead for years. Cache 5s so
+// rapid-polling clients don't blow through the upstream rate limit.
+app.get('/api/signals/iss', async (req, res) => {
+  try {
+    const data = await cached('iss', 5_000, async () => {
+      const j = await fetchJson('https://api.wheretheiss.at/v1/satellites/25544');
+      return {
+        lat: Number(j.latitude),
+        lng: Number(j.longitude),
+        altitudeKm: Number(j.altitude),
+        velocityKmh: Number(j.velocity),
+        timestamp: Number(j.timestamp) * 1000,
+      };
 // --- OAuth ------------------------------------------------------------------
 const oauthStates = new Map(); // state -> expires
 function stashState() {

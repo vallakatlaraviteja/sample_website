@@ -143,6 +143,50 @@ Free tier max 3 alerts. Verified tier max 25.
 
 ---
 
+## Critical Combat Mode — verdict on this build
+
+**ASSUMPTIONS attacked**
+- "Best ever existed" is marketing, not a spec. I built something concretely deployable instead of chasing a slogan.
+- Free Render tier was assumed acceptable. If you need always-on, this build does not meet that.
+- Vanilla JS over React/Vue was assumed. Rationale: zero build step, fastest first paint, smallest LOC for the same UX. If you plan to grow the UI past a few panels, this will not scale and you will regret it around month two.
+
+**ATTACK angles**
+- *Investor:* "Is there a moat?" No. The data is public. Any team can reproduce this in a weekend. Moat would need proprietary data, network effect from pulses, or paid alerts.
+- *Customer:* "Why would I come back?" There is no notification, no follow, no account. Currently a one-shot demo. Retention loop is not built.
+- *Architect:* Single Node process serves static + API + caches. Fine at 100 req/s, dies at 5k. No queue, no worker, no CDN for the globe textures (loaded from unpkg — third-party SPOF).
+- *Compliance:* Zero PII collected, but free-text pulse fields are an obvious abuse vector. There is no moderation, profanity filter, or auth. Public submission with rate-limit only.
+- *Malicious user:* Can spam 10 pulses/min/IP. Can rotate IPs. Can post offensive titles. Mitigation needed before any public launch: auth + manual moderation queue + content classifier.
+- *Competitor:* zoom.earth, ventusky, Cesium ion, Kepler.gl already exist. None are positioned as "world+tech feed". That niche is real but thin.
+
+**EDGE CASES handled**
+- DB down → app stays alive in memory-fallback mode.
+- Third-party API timeouts → cached values served stale, no user-facing error.
+- Rate-limited writes (10/min/IP).
+- Lat/lng + category + length validation server-side.
+- HTML escaping on all user/third-party text.
+- **WebGL missing → text-only fallback dashboard** (no blank screen).
+- **ISS endpoint over HTTPS via wheretheiss.at** (the previous open-notify HTTP endpoint was flaky).
+- **CDN: jsdelivr** (more reliable than unpkg). Still a third-party SPOF — see TODOs.
+- **Tech repo globe positions are decorative** and labeled as such in tooltip + side panel — GitHub doesn't expose owner geo, so we no longer pretend.
+
+**EDGE CASES NOT handled (TODO before public launch)**
+- No auth → spam vector.
+- No moderation → offensive content vector.
+- Globe textures still served from a public CDN. Self-host them under `/public/textures/` for true SPOF removal.
+- Tight CSP allowlist instead of `contentSecurityPolicy: false` in Helmet.
+- Render free-tier cold start: first user every 15 minutes waits 30-50 seconds. Mitigate with an external cron pinging `/api/health`.
+- IPv6, screen-reader, and reduced-motion experiences are minimal.
+
+**ALTERNATIVES considered & rejected**
+- Cesium ion — heavier, requires API key, overkill for this scope.
+- React + Vite — added 200kb JS and a build step for zero UX gain at this size.
+- SQLite on Render disk — Render free tier has ephemeral disk, would lose data on every deploy. Postgres is the right call.
+- Server-side rendering — pointless for an interactive 3D canvas.
+
+**VERDICT: PIVOT**
+Not "the best website ever." That is not a deliverable. What this *is*: a real, deployable, full-stack 3D dashboard with live data and a clear extension surface. Ship it as a portfolio piece or a v0 of a real product. Do **not** ship publicly without adding auth, moderation, and a CDN for textures.
+
+If the goal is a product: the next three moves are (1) auth + email follow on pulse categories, (2) move textures to your own CDN, (3) add a moderation queue and a single paid tier for "verified pulse" badges. Until those exist, this is a tech demo, not a business.
 ## Critical Combat Mode — v2 verdict
 
 The four pivots requested are **shipped**:
