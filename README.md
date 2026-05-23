@@ -104,13 +104,17 @@ Categories: `tech`, `science`, `climate`, `space`, `health`, `culture`, `other`.
 - Rate-limited writes (10/min/IP).
 - Lat/lng + category + length validation server-side.
 - HTML escaping on all user/third-party text.
+- **WebGL missing → text-only fallback dashboard** (no blank screen).
+- **ISS endpoint over HTTPS via wheretheiss.at** (the previous open-notify HTTP endpoint was flaky).
+- **CDN: jsdelivr** (more reliable than unpkg). Still a third-party SPOF — see TODOs.
+- **Tech repo globe positions are decorative** and labeled as such in tooltip + side panel — GitHub doesn't expose owner geo, so we no longer pretend.
 
-**EDGE CASES NOT handled**
+**EDGE CASES NOT handled (TODO before public launch)**
 - No auth → spam vector.
 - No moderation → offensive content vector.
-- No WebGL fallback → user with no GPU sees a blank screen.
-- Texture assets loaded from `unpkg` — if unpkg is down, the globe is unstyled.
-- Render free-tier cold start: first user every 15 minutes waits 30-50 seconds.
+- Globe textures still served from a public CDN. Self-host them under `/public/textures/` for true SPOF removal.
+- Tight CSP allowlist instead of `contentSecurityPolicy: false` in Helmet.
+- Render free-tier cold start: first user every 15 minutes waits 30-50 seconds. Mitigate with an external cron pinging `/api/health`.
 - IPv6, screen-reader, and reduced-motion experiences are minimal.
 
 **ALTERNATIVES considered & rejected**

@@ -6,11 +6,29 @@
   <meta name="theme-color" content="#020617" />
   <meta name="description" content="TerraPulse - real-time 3D Earth dashboard fusing live world and tech signals." />
   <title>TerraPulse - Live Pulse of the Planet</title>
-  <link rel="preconnect" href="https://unpkg.com" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link rel="dns-prefetch" href="https://cdn.jsdelivr.net" />
   <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div id="globe-container" aria-label="Interactive 3D globe of Earth"></div>
+
+  <!-- WebGL fallback. Hidden by default; revealed by main.js when WebGL
+       is missing or fails to initialize. Keeps the API and side-panel
+       useful for users on low-end devices, headless browsers, etc. -->
+  <div id="webgl-fallback" hidden>
+    <div class="fallback-card">
+      <h1>TerraPulse</h1>
+      <p class="fallback-sub">Your browser doesn't support WebGL, so the 3D globe can't render. Live signals are still streaming below.</p>
+      <div class="fallback-grid">
+        <section><h2>Recent earthquakes</h2><ul id="fb-quakes"><li class="fb-empty">loading…</li></ul></section>
+        <section><h2>ISS position</h2><div id="fb-iss" class="fb-iss">loading…</div></section>
+        <section><h2>Trending repos</h2><ul id="fb-tech"><li class="fb-empty">loading…</li></ul></section>
+        <section><h2>User pulses</h2><ul id="fb-pulses"><li class="fb-empty">loading…</li></ul></section>
+      </div>
+      <p class="fallback-foot">Try a desktop browser with hardware acceleration enabled to see the globe.</p>
+    </div>
+  </div>
 
   <header class="topbar">
     <div class="brand">
@@ -91,9 +109,11 @@
     <p>Booting the planet…</p>
   </div>
 
-  <!-- Three.js + globe.gl from CDN. Pinned versions for stability. -->
-  <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
-  <script src="https://unpkg.com/globe.gl@2.32.4/dist/globe.gl.min.js"></script>
+  <!-- Three.js + globe.gl from jsdelivr (more reliable than unpkg).
+       Pinned versions for stability. Loaded before main.js so the global
+       `Globe` constructor exists when main.js runs. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/globe.gl@2.32.4/dist/globe.gl.min.js"></script>
   <script src="/main.js" type="module"></script>
 </body>
 </html>

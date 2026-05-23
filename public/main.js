@@ -1,6 +1,102 @@
 // TerraPulse frontend - 3D globe + live signals.
 // Globe.gl is exposed as window.Globe via UMD.
 
+// --- WebGL pre-flight -------------------------------------------------------
+// Detect WebGL support BEFORE we touch globe.gl. globe.gl will silently
+// produce a black canvas on failure; users on no-GPU / headless / locked-down
+// browsers should get a usable text dashboard instead.
+function hasWebGL() {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl =
+      canvas.getContext('webgl2') ||
+      canvas.getContext('webgl') ||
+      canvas.getContext('experimental-webgl');
+    if (!gl) return false;
+    // Some browsers expose a context but lose it immediately.
+    const lose = gl.getExtension && gl.getExtension('WEBGL_lose_context');
+    if (lose && typeof lose.loseContext === 'function') {
+      // probe only; do not actually call loseContext on the live ctx.
+    }
+    return true;
+  } catch (_e) {
+    return false;
+  }
+}
+
+if (!window.Globe || !hasWebGL()) {
+  bootFallback(!window.Globe ? 'globe.gl failed to load' : 'WebGL unavailable');
+} else {
+  bootGlobe();
+}
+
+// --- Fallback boot (no globe) ----------------------------------------------
+async function bootFallback(reason) {
+  console.warn('[terrapulse] running in fallback mode:', reason);
+  document.body.classList.add('no-webgl');
+  const fb = document.getElementById('webgl-fallback');
+  if (fb) fb.hidden = false;
+  const loading = document.getElementById('loading');
+  if (loading) loading.remove();
+
+  const fmt = (s) => (s == null ? '' : String(s));
+  const esc = (s) => fmt(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  async function getJson(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+  }
+
+  async function refresh() {
+    const [quakes, tech, iss, pulses] = await Promise.allSettled([
+      getJson('/api/signals/quakes'),
+      getJson('/api/signals/tech'),
+      getJson('/api/signals/iss'),
+      getJson('/api/pulses?limit=20'),
+    ]);
+
+    const ulQ = document.getElementById('fb-quakes');
+    if (ulQ && quakes.status === 'fulfilled') {
+      const top = quakes.value.slice().sort((a, b) => (b.mag || 0) - (a.mag || 0)).slice(0, 10);
+      ulQ.innerHTML = top.length
+        ? top.map((q) => `<li><strong>M ${q.mag?.toFixed?.(1) ?? '?'}</strong> · ${esc(q.place)}</li>`).join('')
+        : '<li class="fb-empty">no recent quakes</li>';
+    }
+
+    const ulT = document.getElementById('fb-tech');
+    if (ulT && tech.status === 'fulfilled') {
+      const top = tech.value.slice(0, 10);
+      ulT.innerHTML = top.length
+        ? top.map((t) => `<li><strong>${esc(t.name)}</strong> · ⭐ ${t.stars}</li>`).join('')
+        : '<li class="fb-empty">no data</li>';
+    }
+
+    const issEl = document.getElementById('fb-iss');
+    if (issEl && iss.status === 'fulfilled') {
+      const v = iss.value;
+      issEl.textContent = `lat ${v.lat.toFixed(2)}, lng ${v.lng.toFixed(2)}` +
+        (v.altitudeKm ? ` · alt ${v.altitudeKm.toFixed(0)}km` : '');
+    } else if (issEl) {
+      issEl.textContent = 'unavailable';
+    }
+
+    const ulP = document.getElementById('fb-pulses');
+    if (ulP && pulses.status === 'fulfilled') {
+      ulP.innerHTML = pulses.value.length
+        ? pulses.value.map((p) => `<li><strong>${esc(p.title)}</strong> · ${esc(p.category)}</li>`).join('')
+        : '<li class="fb-empty">no pulses yet</li>';
+    }
+  }
+
+  refresh();
+  setInterval(refresh, 60_000);
+}
+
+// --- Globe boot -------------------------------------------------------------
+function bootGlobe() {
 const Globe = window.Globe;
 
 const state = {
@@ -23,9 +119,9 @@ const $hint = document.getElementById('pulse-hint');
 
 // --- Globe setup ------------------------------------------------------------
 const globe = Globe()
-  .globeImageUrl('https://unpkg.com/three-globe@2.31.0/example/img/earth-night.jpg')
-  .bumpImageUrl('https://unpkg.com/three-globe@2.31.0/example/img/earth-topology.png')
-  .backgroundImageUrl('https://unpkg.com/three-globe@2.31.0/example/img/night-sky.png')
+  .globeImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-night.jpg')
+  .bumpImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/earth-topology.png')
+  .backgroundImageUrl('https://cdn.jsdelivr.net/npm/three-globe@2.31.0/example/img/night-sky.png')
   .atmosphereColor('#22d3ee')
   .atmosphereAltitude(0.22)
   .showGraticules(false)
@@ -169,7 +265,7 @@ function labelForPoint(d) {
     const t = d.data;
     return `<div><strong>${escapeHtml(t.name)}</strong> · ⭐ ${t.stars}</div>
       <div style="opacity:.8;font-size:11px;max-width:240px">${escapeHtml(t.description || '')}</div>
-      <div style="opacity:.6;font-size:10px;margin-top:4px">${escapeHtml(t.language || '')}</div>`;
+      <div style="opacity:.6;font-size:10px;margin-top:4px">${escapeHtml(t.language || '')} · <em>position is decorative, not geographic</em></div>`;
   }
   if (d.kind === 'pulse') {
     const p = d.data;
@@ -220,7 +316,10 @@ function renderPanel() {
     return;
   }
 
-  $panelBody.innerHTML = items.map(itemHtml).join('');
+  const noteHtml = tab === 'tech'
+    ? `<div class="panel-note">Repo positions on the globe are decorative — GitHub doesn't expose owner geography.</div>`
+    : '';
+  $panelBody.innerHTML = noteHtml + items.map(itemHtml).join('');
   $panelBody.querySelectorAll('.item').forEach((el) => {
     el.addEventListener('click', () => {
       const lat = Number(el.dataset.lat);
@@ -431,3 +530,6 @@ function scheduleIdleRotate() {
   window.addEventListener(ev, scheduleIdleRotate, { passive: true })
 );
 scheduleIdleRotate();
+
+
+} // end bootGlobe()
